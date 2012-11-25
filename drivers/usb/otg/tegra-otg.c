@@ -230,18 +230,20 @@ static void irq_work(struct work_struct *work)
 		dev_info(tegra->otg.dev, "%s --> %s\n", tegra_state_name(from),
 					      tegra_state_name(to));
 
-		if (tegra->charger_cb)
-			tegra->charger_cb(to, from, tegra->charger_cb_data);
-
 		if (to == OTG_STATE_A_SUSPEND) {
-			if (from == OTG_STATE_A_HOST)
+			if (from == OTG_STATE_A_HOST) {
 				tegra_stop_host(tegra);
+				if (tegra->charger_cb)
+					tegra->charger_cb(to, from, tegra->charger_cb_data);
+			}
 			else if (from == OTG_STATE_B_PERIPHERAL && otg->gadget)
 				usb_gadget_vbus_disconnect(otg->gadget);
 		} else if (to == OTG_STATE_B_PERIPHERAL && otg->gadget) {
 			if (from == OTG_STATE_A_SUSPEND)
 				usb_gadget_vbus_connect(otg->gadget);
 		} else if (to == OTG_STATE_A_HOST) {
+			if (tegra->charger_cb)
+				tegra->charger_cb(to, from, tegra->charger_cb_data);
 			if (from == OTG_STATE_A_SUSPEND)
 			tegra_start_host(tegra);
 		}
