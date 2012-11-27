@@ -129,6 +129,7 @@ struct wake_lock charger_wakelock;
 static unsigned int project_id;
 static unsigned int pcba_ver;
 static int gpio_dock_in = 0;
+static int autoSwitchToSelfPoweredHostMode = 1;
 static int lastExternalPowerState = 0;
 static int lastOtgState = 0;
 static int lastChargeSlaveDevicesState = 0;
@@ -879,7 +880,7 @@ static void smb347_otg_status(enum usb_otg_state to, enum usb_otg_state from, vo
 		//  charger->state,charger->cur_cable_type,newExternalPowerState);
 
 		if(newExternalPowerState != lastExternalPowerState) {
-			/* configure charger */
+			/* configure charger: enable or disable charging of internal battery */
 			printk("smb347_otg_status change use of external power to %d xxxxxxxxxxxxxxxxxxxxxxxxxx\n",newExternalPowerState);
 			ret = smb347_configure_charger(client, newExternalPowerState);
 			if (ret < 0)
@@ -887,7 +888,7 @@ static void smb347_otg_status(enum usb_otg_state to, enum usb_otg_state from, vo
 					"otg..\n", __func__);
 		}
 
-		// update host-mode and slave-charging
+		// enable host-mode and configure slave-charging (depending of new external power state)
 		ret = smb347_configure_otg(client, 1, newExternalPowerState>0?0:1, 0);
 		if (ret < 0)
 			dev_err(&client->dev, "%s() error in configuring"
@@ -896,7 +897,7 @@ static void smb347_otg_status(enum usb_otg_state to, enum usb_otg_state from, vo
 	} else if (to == OTG_STATE_A_SUSPEND) {
 
 		if(from == OTG_STATE_A_HOST) {
-			// update host-mode and slave-charging
+			// disable host-mode and slave-charging
 			ret = smb347_configure_otg(client, 0, 0, lastExternalPowerState>0?0:1);
 			if (ret < 0)
 				dev_err(&client->dev, "%s() error in configuring"
@@ -904,7 +905,7 @@ static void smb347_otg_status(enum usb_otg_state to, enum usb_otg_state from, vo
 		}
 
 		if(newExternalPowerState && !lastExternalPowerState) {
-			/* configure charger */
+			/* configure charger: enable charging of internal battery */
 			printk("smb347_otg_status enable external charge xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
 			ret = smb347_configure_charger(client, 1);
 			if (ret < 0)
@@ -1060,22 +1061,33 @@ static void inok_isr_work_function(struct work_struct *dat)
 	printk("inok_isr_work_function power loss/gain lastOtgState=%d lastExternalPowerState=%d lastChargeSlaveDevicesState=%d xxxxxxxxxxxxxxxxx\n",
 		lastOtgState,lastExternalPowerState,lastChargeSlaveDevicesState);
 	if(lastOtgState>0 && lastExternalPowerState>0) {
-		// external power loss in host mode
-		// we need to self-charge slave devices now in order to continue host mode in OTG mode
+		// we used to be in externally powered host mode
+		// this means external power was just lost
 		cancel_delayed_work(&charger->curr_limit_work);
 		cancel_delayed_work(&charger->inok_isr_work);
+		smb347_clear_interrupts(client);
+
 		printk("inok_isr_work_function lost external power in host mode; try continue host mode by self-charging slave devices xxxxx\n");
-		smb347_otg_status(OTG_STATE_A_HOST,OTG_STATE_A_HOST,NULL);
+		// normally, smb347_otg_status() is called whenever the OTG adapter is pulled or plugged
+		// but here, external power was lost while the OTG adapter remains plugged
+		// we call smb347_otg_status() now, to activate self-charging of slave devices to continue host mode in std OTG mode 
+		// NOTE: if we would NOT call smb347_otg_status() here, slave devices would be without power now
+		if(autoSwitchToSelfPoweredHostMode)
+			smb347_otg_status(OTG_STATE_A_HOST,OTG_STATE_A_HOST,NULL);
+
 		return;
 	}
-	
+
+	// we were NOT in externally powered host mode
 	cable_type_detect();
-	// if external power was just plugged, this check might come too early
 	if(charger->cur_cable_type!=1 && charger->cur_cable_type!=3) {
+		// no power is currently available
 		if(lastExternalPowerState>0) {
 			printk("inok_isr_work_function lost external power just now xxxxxxxxx\n");
 		} else {
-			// wait up to 1300 ms for external power detection
+			// we did not have power before, so it might come in now...
+			// the cable_type_detect check above MAY have come too early
+			// we wait up to 1300 ms for external power detection
 			printk("inok_isr_work_function wait for external power detection ... xxxxxxxxx\n");
 			schedule_timeout_interruptible(msecs_to_jiffies(300));
 			cable_type_detect();
@@ -1091,19 +1103,22 @@ static void inok_isr_work_function(struct work_struct *dat)
 	}
 
 	if(charger->cur_cable_type!=1 && charger->cur_cable_type!=3) {
+		// still no power incoming
 		printk("inok_isr_work_function no power: cancel charger events xxxxxxxxx\n");
 		cancel_delayed_work(&charger->curr_limit_work);
 		cancel_delayed_work(&charger->inok_isr_work);
 		smb347_clear_interrupts(client);
 		lastExternalPowerState = 0;
-	} else {
-		printk("inok_isr_work_function external power available xxxxxxxxxxx\n");
+		return;
 	}
+
+	// power is incoming
+	printk("inok_isr_work_function external power available xxxxxxxxxxx\n");
 }
 
 static void dockin_isr_work_function(struct work_struct *dat)
 {
-	struct i2c_client *client = charger->client;
+	//struct i2c_client *client = charger->client;
 
 	int dock_in = gpio_dock_in;
 	int ac_ok = GPIO_AC_OK;
@@ -1199,8 +1214,8 @@ static int __devinit smb347_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct i2c_adapter *adapter = to_i2c_adapter(client->dev.parent);
-	int ret, irq_num;
-	uint8_t buf[15];
+	int ret; //, irq_num;
+	//uint8_t buf[15];
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE))
 		return -EIO;
@@ -1259,6 +1274,7 @@ static int __devinit smb347_probe(struct i2c_client *client,
 
 	queue_delayed_work(smb347_wq, &charger->cable_det_work, 0.5*HZ);
 
+	// todo: read cfg; may need to clear autoSwitchToSelfPoweredHostMode
 	ret = register_otg_callback(smb347_otg_status, charger);
 	if (ret < 0)
 		goto error;
