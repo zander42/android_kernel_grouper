@@ -110,7 +110,7 @@
 #define ADAPTER_PROTECT_DELAY (4*HZ)
 #define GPIO_AC_OK		TEGRA_GPIO_PV1
 
-#define AUTOSWITCH_SELFPOWERED_HOSTMODE
+#define AUTOSWITCH_SELFPOWERED_HOSTMODE  // outremark for 'fixed installation' mode
 
 /* Functions declaration */
 static int smb347_configure_charger(struct i2c_client *client, int value);
